@@ -1,0 +1,129 @@
+def call(Map params) {
+
+    def customImage;
+    pipeline {
+        agent any
+        tools {
+                   maven 'maven'
+
+        }
+        environment {
+            //Use Pipeline Utility Steps plugin to read information from pom.xml into env variables
+            IMAGE = readMavenPom().getArtifactId()
+            VERSION = readMavenPom().getVersion()
+            ECRURL = 'https://135812298867.dkr.ecr.us-east-2.amazonaws.com/lixo/'
+            ECRCRED = ''
+        }
+        stages {
+            stage('checkout git') {
+                steps {
+                   checkout scm
+                }
+            }
+            stage ('test') {
+                steps {
+
+                    script{
+                    // parallel (
+                    // "unit tests": { sh 'mvn test' },
+                    log.info("skip test for now")
+                }
+                   // )
+                }
+            }
+            stage('build') {
+                steps {
+                    sh 'mvn clean install -DskipTests=true'
+
+                   }
+            }
+
+            stage("Sonar Analysis") {
+
+                agent any
+                steps {
+                    withSonarQubeEnv('sonar-7') {
+                        sh 'mvn clean package sonar:sonar'
+                    }
+                }
+            }
+            stage("Quality Gate") {
+                steps {
+                    timeout(time: 1, unit: 'HOURS') {
+                        waitForQualityGate abortPipeline: true
+                    }
+                }
+            }
+
+            stage('Approval Request') {
+                input {
+                    message "Can we proceed to deploy? If yes,please click OK to approve this request"
+                    ok "Yes, we can proceed."
+                    submitter "vijai,prabhu"
+                    parameters {
+                        string(name: 'Vijai', defaultValue: 'Admin', description: 'Deployment for latest image')
+                    }
+                }
+                steps {
+                    echo "Deployment for ($IMAGE:$VERSION) is in progress..."
+                }
+            }
+            stage('Docker build')
+                    {
+                        steps
+                                {
+                                    script
+                                            {
+                                                // Build the docker image using a Dockerfile
+                                                //docker.build("$IMAGE","$VERSION")
+                                                customImage  = docker.build("$IMAGE:$VERSION")
+
+
+                                            }
+                                }
+                    }
+            stage('Docker push')
+                    {
+                        steps
+                                {
+                                    script
+                                            {
+                                                // login to ECR - for now it seems that that the ECR Jenkins plugin is not performing the login as expected. I hope it will in the future.
+                                                sh("eval \$(aws ecr get-login --no-include-email --region us-east-2 | sed 's|https://||')")
+                                                // Push the Docker image to ECR
+                                                docker.withRegistry("https://135812298867.dkr.ecr.us-east-2.amazonaws.com/lixo")
+                                                        {
+                                                            customImage.push()
+                                                            customImage.push('latest')
+                                                        }
+                                            }
+                                }
+                    }
+            stage('deploy'){
+                steps{
+                    script {
+                        if (params.branch == 'master') {
+                            log.info("deploying ${IMAGE} to QA server from branch "+ params.branch)
+                            deploy()
+                        } else if (params.branch=='develop') {
+                            log.info("deploying ${IMAGE} to QA server from branch "+ params.branch)
+                            deployDev()
+                        } else {
+                            log.info("deploying ${IMAGE} to Dev server from branch  "+ params.branch)
+                            deployQA('117.200.79.44')
+                        }
+                    }
+                }
+
+            }
+
+
+
+        }
+        post {
+            failure {
+                mail to: params.email, subject: 'Pipeline failed', body: "${env.BUILD_URL}"
+            }
+        }
+    }
+}
